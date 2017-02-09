@@ -1,26 +1,14 @@
 import webapp2
 import cgi
+import jinja2
+import os
+from google.appengine.ext import db
 
+# set up jinja
+template_dir = os.path.join(os.path.dirname(__file__), "templates")
+jinja_env = jinja2.Environment(loader = jinja2.FileSystemLoader(template_dir))
 
-# html boilerplate for the top of every page
-page_header = """
-<!DOCTYPE html>
-<html>
-<head>
-    <link type="text/css" rel="stylesheet" href="serveup/mystyle.css">
-    <title>FlickList</title>
-</head>
-<body>
-    <h1>FlickList</h1>
-"""
-
-# html boilerplate for the bottom of every page
-page_footer = """
-</body>
-</html>
-"""
-
-#Bad movies
+# a list of movies that nobody should be allowed to watch
 terrible_movies = [
     "Gigli",
     "Star Wars Episode 1: Attack of the Clones",
@@ -28,127 +16,150 @@ terrible_movies = [
     "Nine Lives"
 ]
 
-#fetch the watchlist
-watchlist = [
-    "Star Wars",
-    "Minions",
-    "Freaky Friday",
-    "My Favorite Martian"
-]
 
-class Index(webapp2.RequestHandler):
+class Movie(db.Model):
+    title = db.StringProperty(required = True)
+    created = db.DateTimeProperty(auto_now_add = True)
+    watched = db.BooleanProperty(required = True, default = False)
+    rating = db.StringProperty()
+
+
+def getUnwatchedMovies():
+    """ Returns the list of movies the user wants to watch (but hasnt yet) """
+
+    return [ "Star Wars", "Minions", "Freaky Friday", "My Favorite Martian" ]
+
+
+def getWatchedMovies():
+    """ Returns the list of movies the user has already watched """
+
+    return [ "The Matrix", "The Big Green", "Ping Ping Playa" ]
+
+
+class Handler(webapp2.RequestHandler):
+    """ A base RequestHandler class for our app.
+        The other handlers inherit form this one.
+    """
+
+    def renderError(self, error_code):
+        """ Sends an HTTP error code and a generic "oops!" message to the client. """
+
+        self.error(error_code)
+        self.response.write("Oops! Something went wrong.")
+
+
+class Index(Handler):
     """ Handles requests coming in to '/' (the root of our site)
         e.g. www.flicklist.com/
     """
 
     def get(self):
-
-        error=self.request.get("error")
-        edit_header = "<h3>Edit My Watchlist</h3>"+"<h2>"+cgi.escape(error)+"</h2>"
-
-        # a form for adding new movies
-        add_form = """
-        <form action="/add" method="post">
-            <label>
-                I want to add
-                <input type="text" name="new-movie"/>
-                to my watchlist.
-            </label>
-            <input type="submit" value="Add It"/>
-        </form>
-        """
-
-        # TODO 1
-        # Include another form so the user can "cross off" a movie from their list.
-        remove_form = """
-        <form action="/remove" method="post">
-            <label>
-                I want to remove"""
-        remove_form+='<select name = "old-movie">'
-        for index, move in enumerate(watchlist):
-            remove_form += '<option value="'+move+'">'+move+'</option>'
-        remove_form+="""</select>"
-                from my watchlist.
-            </label>
-            <input type="submit" value="Remove It"/>
-        </form>
-        """
-
-        # TODO 4 (Extra Credit)
-        # modify your form to use a dropdown (<select>) instead a
-        # text box (<input type="text"/>)
-
-
-        content = page_header + edit_header + add_form + remove_form + page_footer
+        unwatched_movies = db.GqlQuery("SELECT * FROM Movie where watched = False")
+        t = jinja_env.get_template("frontpage.html")
+        content = t.render(
+                        movies = unwatched_movies,
+                        error = self.request.get("error"))
         self.response.write(content)
 
-
-class AddMovie(webapp2.RequestHandler):
+class AddMovie(Handler):
     """ Handles requests coming in to '/add'
         e.g. www.flicklist.com/add
     """
 
     def post(self):
-        # look inside the request to figure out what the user typed
-        new_movie = self.request.get("new-movie")
+        new_movie_title = self.request.get("new-movie")
 
-        #check for errors
-        if (not new_movie) or (new_movie.strip() == ""):
+        # if the user typed nothing at all, redirect and yell at them
+        if (not new_movie_title) or (new_movie_title.strip() == ""):
             error = "Please specify the movie you want to add."
             self.redirect("/?error=" + cgi.escape(error))
 
-        #Check for bad movies
-        if new_movie in terrible_movies:
-            error = "Trust me, you don't want to add '{0}' to your Watchlist.".format(new_movie)
+        # if the user wants to add a terrible movie, redirect and yell at them
+        if new_movie_title in terrible_movies:
+            error = "Trust me, you don't want to add '{0}' to your Watchlist.".format(new_movie_title)
             self.redirect("/?error=" + cgi.escape(error, quote=True))
-        # build response content
-        new_movie = cgi.escape(new_movie)
-        new_movie_element = "<strong>" + new_movie + "</strong>"
-        watchlist.append(new_movie)
-        sentence = new_movie_element + " has been added to your Watchlist!"
-        add_form = """
-        <form action="/" method="get">
-            <input type="submit" value="Home"/>
-        </form>
-        """
-        content = page_header + "<p>" + sentence + "</p>" +add_form+ page_footer
+
+        # 'escape' the user's input so that if they typed HTML, it doesn't mess up our site
+        new_movie_title_escaped = cgi.escape(new_movie_title, quote=True)
+
+        # construct a movie object for the new movie
+        movie = Movie(title = new_movie_title_escaped)
+        movie.put()
+
+        # render the confirmation message
+        t = jinja_env.get_template("add-confirmation.html")
+        content = t.render(movie = movie)
         self.response.write(content)
 
 
-# TODO 2
-# Create a new RequestHandler class called CrossOffMovie, to receive and
-# handle the request from your 'cross-off' form. The user should see a message like:
-# "Star Wars has been crossed off your watchlist".
-class CrossOffMovie(webapp2.RequestHandler):
-    """ Handles requests coming in to '/remove'
-        e.g. www.flicklist.com/remove
+class WatchedMovie(Handler):
+    """ Handles requests coming in to '/watched-it'
+        e.g. www.flicklist.com/watched-it
     """
 
+    def renderError(self, error_code):
+        self.error(error_code)
+        self.response.write("Oops! Something went wrong.")
+
+
     def post(self):
-        # look inside the request to figure out what the user typed
-        old_movie = self.request.get("old-movie")
-        old_movie = cgi.escape(old_movie)
-        if old_movie not in watchlist:
-            error = "That movie is not in your list."
-            self.redirect("/?error=" + cgi.escape(error))
-        # build response content
-        old_movie_element = "<strike>" + old_movie + "</strike>"
-        sentence = old_movie_element + " has been removed from your Watchlist!"
-        watchlist.remove(old_movie)
-        add_form = """
-        <form action="/" method="get">
-            <input type="submit" value="Home"/>
-        </form>
-        """
-        content = page_header + "<p>" + sentence + "</p>" +add_form+ page_footer
+        watched_movie_id = self.request.get("watched-movie")
+
+        watched_movie = Movie.get_by_id( int(watched_movie_id) )
+
+        # if we can't find the movie, reject.
+        if not watched_movie:
+            self.renderError(400)
+            return
+
+        # update the movie's ".watched" property to True
+        watched_movie.watched = True
+        watched_movie.put()
+
+        # render confirmation page
+        t = jinja_env.get_template("watched-it-confirmation.html")
+        content = t.render(movie = watched_movie)
         self.response.write(content)
 
 
+class MovieRatings(Handler):
 
-# TODO 3
-# Include a route for your cross-off handler, by adding another tuple to the list below.
+    def get(self):
+        # TODO 1
+        # Make a GQL query for all the movies that have been watched
+        watched_movies = [] # type something else instead of an empty list
+
+        # TODO (extra credit)
+        # in the query above, add something so that the movies are sorted by creation date, most recent first
+
+        t = jinja_env.get_template("ratings.html")
+        content = t.render(movies = watched_movies)
+        self.response.write(content)
+
+    def post(self):
+        rating = self.request.get("rating")
+        movie_id = self.request.get("movie")
+
+        # TODO 2
+        # retreive the movie entity whose id is movie_id
+        movie = None # type something else instead of None
+
+        if movie and rating:
+            # TODO 3
+            # update the movie's rating property and save it to the database
+
+
+            # render confirmation
+            t = jinja_env.get_template("rating-confirmation.html")
+            content = t.render(movie = movie)
+            self.response.write(content)
+        else:
+            self.renderError(400)
+
+
 app = webapp2.WSGIApplication([
     ('/', Index),
     ('/add', AddMovie),
-    ('/remove',CrossOffMovie)
+    ('/watched-it', WatchedMovie),
+    ('/ratings', MovieRatings)
 ], debug=True)
